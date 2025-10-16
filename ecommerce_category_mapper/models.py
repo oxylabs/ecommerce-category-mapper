@@ -23,15 +23,15 @@ class CategoryMap(BaseModel):
     categories: List[Category] = Field(..., description="List of all discovered categories")
     total_categories: int = Field(..., description="Total number of categories found")
     
-    def get_root_categories(self) -> List[Category]:
-        """Get all root categories (level 0)."""
-        return [cat for cat in self.categories if cat.level == 0]
-    
-    def get_categories_by_level(self, level: int) -> List[Category]:
+    def get_categories_by_level(self, level: int) -> list[Category]:
         """Get all categories at a specific level."""
         return [cat for cat in self.categories if cat.level == level]
     
-    def get_children(self, parent_url: str) -> List[Category]:
+    def get_root_categories(self) -> list[Category]:
+        """Get all root categories (level 0)."""
+        return self.get_categories_by_level(0)
+    
+    def get_children(self, parent_url: str) -> list[Category]:
         """Get all direct children of a parent category."""
         return [cat for cat in self.categories if cat.parent_category_url == parent_url]
     

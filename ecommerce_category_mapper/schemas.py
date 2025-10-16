@@ -23,11 +23,11 @@ CATEGORY_SCHEMA = {
           },
           "url": {
             "type": "string",
-            "description": "The URL copied EXACTLY from markdown parentheses without modification."
+            "description": "The URL copied EXACTLY from markdown parentheses without modification. If id does not include the domain, please add it."
           },
           "breadcrumbs": {
             "type": "array",
-            "description": "Breadcrumb path from root to current category."
+            "description": "Breadcrumb path from root to current category, including root(very important) category and current category."
           },
           "parent_category_url": {
             "type": "string",

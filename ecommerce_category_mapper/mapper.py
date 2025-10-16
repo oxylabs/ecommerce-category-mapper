@@ -4,13 +4,15 @@ import asyncio
 import logging
 import time
 from typing import List, Optional, Dict, Any, Set
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from oxylabs_ai_studio.apps.ai_scraper import AiScraper
 
 from .models import Category, CategoryMap
 from .schemas import CATEGORY_SCHEMA
 
 logger = logging.getLogger(__name__)
+MIN_CATEGORIES_THRESHOLD_PER_DEPTH = 1
+MAX_NO_CATEGORIES_THRESHOLD_PER_DEPTH = 0.7
 
 
 class RateLimiter:
@@ -52,10 +54,9 @@ class URLTracker:
         self.categories_found_per_url: Dict[str, int] = {}
         self.depth_stats: Dict[int, Dict[str, Any]] = {}
     
-    def mark_url_visited(self, url: str, categories_found: int = 0):
+    def mark_url_visited(self, url: str):
         """Mark a URL as visited and record categories found."""
         self.visited_urls.add(url)
-        self.categories_found_per_url[url] = categories_found
     
     def get_depth_stats(self, depth: int) -> Dict[str, Any]:
         """Get statistics for a specific depth level."""
@@ -79,18 +80,18 @@ class URLTracker:
         else:
             stats['urls_without_categories'] += 1
     
-    def should_stop_exploration_at_depth(self, depth: int, min_categories_threshold: int = 1) -> bool:
+    def should_stop_exploration_at_depth(self, depth: int) -> bool:
         """Determine if exploration should stop at this depth."""
         stats = self.get_depth_stats(depth)
         
         if stats['urls_processed'] >= 5:
             category_rate = stats['total_categories_found'] / stats['urls_processed']
-            if category_rate < min_categories_threshold:
+            if category_rate < MIN_CATEGORIES_THRESHOLD_PER_DEPTH:
                 return True
         
         if stats['urls_processed'] >= 3:
             no_category_rate = stats['urls_without_categories'] / stats['urls_processed']
-            if no_category_rate > 0.7:
+            if no_category_rate > MAX_NO_CATEGORIES_THRESHOLD_PER_DEPTH:
                 return True
         
         return False
@@ -139,7 +140,8 @@ class CategoryMapper:
         max_depth: int = 2,
         delay_between_requests: float = 1.0,
         max_concurrent_requests: int = 5,
-        max_categories: int = 100
+        max_categories: int = 100,
+        render_javascript: bool = False
     ):
         """
         Initialize the CategoryMapper.
@@ -150,12 +152,14 @@ class CategoryMapper:
             delay_between_requests: Delay between requests in seconds (default: 1.0)
             max_concurrent_requests: Maximum concurrent requests (default: 5)
             max_categories: Maximum categories to extract (default: 100)
+            render_javascript: Whether to render JavaScript on pages (default: False)
         """
         self.api_key = api_key
         self.max_depth = max_depth
         self.delay_between_requests = delay_between_requests
         self.max_concurrent_requests = max_concurrent_requests
         self.max_categories = max_categories
+        self.render_javascript = render_javascript
         
         self.ai_scraper = AiScraper(api_key=api_key)
         self.logger = logger
@@ -164,12 +168,12 @@ class CategoryMapper:
         self.exploration_controller = SmartExplorationController(self.url_tracker)
         self.stop_processing = False
         self.categories_schema = CATEGORY_SCHEMA
+        self.discovered_categories = []
+        self.domain = None
     
     def _is_valid_domain_url(self, url: str, domain: str) -> bool:
         """Check if URL belongs to the same domain."""
         try:
-            from urllib.parse import urlparse
-            
             url_parsed = urlparse(url)
             domain_parsed = urlparse(domain)
             
@@ -185,27 +189,23 @@ class CategoryMapper:
     def _create_category_from_data(
         self, 
         cat_data: Dict[str, Any], 
-        source_url: str, 
         domain: str, 
         level: int,
-        discovered_categories: List[Category] = None
     ) -> Optional[Category]:
         """Create a Category object from discovered data."""
         try:
             name = cat_data.get('name', '').strip()
             url = cat_data.get('url', '').strip() if cat_data.get('url') else ''
+            # TODO: check if url includes the domain, if not, add it
+            if not url.startswith(('http://', 'https://')):
+                url = urljoin(domain, url if url.startswith('/') else '/' + url)
+                cat_data['url'] = url
+            
             parent_category_url = cat_data.get('parent_category_url')
             breadcrumbs = cat_data.get('breadcrumbs', [name])
             
-            if not name or not url or url in ['None', 'null']:
-                self.logger.warning(f"Skipping category with invalid data: name='{name}', url='{url}'")
-                return None
-            
-            if not url.startswith(('http://', 'https://')):
-                url = urljoin(domain, url if url.startswith('/') else '/' + url)
-            
-            if not self._is_valid_domain_url(url, domain):
-                self.logger.warning(f"Skipping category with external URL: name='{name}', url='{url}'")
+            if not self._is_valid_category_data(cat_data):
+                self.logger.warning(f"Skipping category with invalid data: {cat_data}")
                 return None
             
             if parent_category_url and parent_category_url not in ['null', 'None', '']:
@@ -236,8 +236,6 @@ class CategoryMapper:
     async def _explore_subcategories_async(
         self, 
         category: Category,
-        domain: str, 
-        discovered_categories: List[Category]
     ) -> None:
         """Explore subcategories for a given category asynchronously."""
         try:
@@ -252,7 +250,7 @@ class CategoryMapper:
             self.logger.info(f"Exploring potential subcategories for: {category.category_name}")
             
             await self._explore_categories_recursively(
-                category.category_url, domain, discovered_categories, category.level + 1
+                category.category_url, category.level + 1
             )
             
         except Exception as e:
@@ -296,24 +294,26 @@ class CategoryMapper:
             domain = f"https://{domain}"
         
         domain = domain.rstrip('/')
-        discovered_categories = []
+        self.domain = domain
+        self.discovered_categories = []
         
         self.logger.info("Starting recursive category exploration from homepage")
-        await self._explore_categories_recursively(domain, domain, discovered_categories, level=0)
+        await self._explore_categories_recursively(url=domain, level=0)
         
         category_map = CategoryMap(
             domain=domain,
-            categories=discovered_categories,
-            total_categories=len(discovered_categories)
+            categories=self.discovered_categories,
+            total_categories=len(self.discovered_categories)
         )
         
-        self.logger.info(f"Mapping completed. Found {len(discovered_categories)} categories")
-        self._log_exploration_stats(discovered_categories)
+        self.logger.info(f"Mapping completed. Found {len(self.discovered_categories)} categories")
+        self._log_exploration_stats()
         
         return category_map
     
-    async def _get_categories_from_page(self, url: str, level: int) -> List[Dict[str, Any]]:
+    async def _get_categories_from_page(self, url: str) -> List[Dict[str, Any]]:
         """Get categories from a URL with rate limiting."""
+        self.url_tracker.mark_url_visited(url)
         async with self.rate_limiter:
             try:
                 if self.stop_processing:
@@ -327,7 +327,7 @@ class CategoryMapper:
                     url=url,
                     output_format="json",
                     schema=self.categories_schema,
-                    render_javascript=False
+                    render_javascript=self.render_javascript
                 )
                 
                 if result.data and isinstance(result.data, dict):
@@ -349,11 +349,11 @@ class CategoryMapper:
             
             return []
     
-    def _log_exploration_stats(self, discovered_categories: List[Category]):
+    def _log_exploration_stats(self):
         """Log exploration statistics for analysis."""
         self.logger.info("=== Exploration Statistics ===")
         self.logger.info(f"Total URLs visited: {len(self.url_tracker.visited_urls)}")
-        self.logger.info(f"Categories found: {len(discovered_categories)} / {self.max_categories} (limit)")
+        self.logger.info(f"Categories found: {len(self.discovered_categories)} / {self.max_categories} (limit)")
         
         for depth in sorted(self.url_tracker.depth_stats.keys()):
             stats = self.url_tracker.depth_stats[depth]
@@ -361,15 +361,13 @@ class CategoryMapper:
                            f"{stats['total_categories_found']} categories found, "
                            f"{stats['urls_with_categories']} URLs with categories")
         
-        high_conf_count = sum(1 for url, count in self.url_tracker.categories_found_per_url.items() 
+        high_conf_count = sum(1 for _, count in self.url_tracker.categories_found_per_url.items() 
                             if count > 0)
         self.logger.info(f"URLs with categories found: {high_conf_count}/{len(self.url_tracker.visited_urls)}")
     
     async def _explore_categories_recursively(
         self, 
         url: str, 
-        domain: str, 
-        discovered_categories: List[Category], 
         level: int
     ) -> None:
         """Recursively explore categories from a URL."""
@@ -386,7 +384,7 @@ class CategoryMapper:
             self.logger.info(f"Smart exploration stopping at depth {level}")
             return
         
-        if len(discovered_categories) >= self.max_categories:
+        if len(self.discovered_categories) >= self.max_categories:
             self.logger.info(f"Reached maximum categories limit ({self.max_categories})")
             self.stop_processing = True
             return
@@ -395,17 +393,17 @@ class CategoryMapper:
             self.logger.debug(f"URL already visited: {url}")
             return
         
-        if not self._is_valid_domain_url(url, domain):
+        if not self._is_valid_domain_url(url, self.domain):
             self.logger.warning(f"Skipping external URL: {url}")
             return
         
         try:
             self.logger.info(f"Exploring {url} (level {level})")
             
-            categories_data = await self._get_categories_from_page(url, level)
+            categories_data = await self._get_categories_from_page(url)
             
             categories_found = len(categories_data) if categories_data else 0
-            self.url_tracker.mark_url_visited(url, categories_found)
+            self.url_tracker.categories_found_per_url[url] = categories_found
             self.exploration_controller.record_depth_exploration(level, categories_found)
             
             if not categories_data:
@@ -420,33 +418,33 @@ class CategoryMapper:
                     continue
                 
                 category = self._create_category_from_data(
-                    cat_data, url, domain, level=level, discovered_categories=discovered_categories
+                    cat_data, self.domain, level=level
                 )
                 
                 if not category:
                     continue
                 
-                if category.category_url not in [c.category_url for c in discovered_categories]:
-                    if len(discovered_categories) < self.max_categories:
-                        discovered_categories.append(category)
+                if category.category_url not in [c.category_url for c in self.discovered_categories]:
+                    if len(self.discovered_categories) < self.max_categories:
+                        self.discovered_categories.append(category)
                         categories_to_explore.append(category)
                         self.logger.info(
                             f"Added category: {category.category_name} "
-                            f"(level {level}, total: {len(discovered_categories)}/{self.max_categories})"
+                            f"(level {level}, total: {len(self.discovered_categories)}/{self.max_categories})"
                         )
                     else:
                         self.logger.info(f"Reached maximum categories limit ({self.max_categories})")
                         self.stop_processing = True
                         break
             
-            if len(discovered_categories) >= self.max_categories:
+            if len(self.discovered_categories) >= self.max_categories:
                 self.logger.info(f"Reached maximum categories limit ({self.max_categories})")
                 self.stop_processing = True
                 return
             
             if not self.stop_processing and categories_to_explore:
                 tasks = [
-                    self._explore_subcategories_async(category, domain, discovered_categories)
+                    self._explore_subcategories_async(category)
                     for category in categories_to_explore
                 ]
                 

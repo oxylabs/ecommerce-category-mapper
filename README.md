@@ -62,14 +62,14 @@ Before you begin, make sure you have Oxylabs AI studio API key. Obtain your API 
 ### Command Line Usage
 
 ```bash
-# Basic usage
-python -m ecommerce_category_mapper https://example-store.com --api-key YOUR_API_KEY
-
-# Save to file
+# Basic usage (output file is required)
 python -m ecommerce_category_mapper https://example-store.com --api-key YOUR_API_KEY --output categories.json
 
 # Advanced configuration
-python -m ecommerce_category_mapper https://example-store.com --api-key YOUR_API_KEY --max-depth 4 --max-concurrent 8 --delay 0.5 --max-categories 200 --verbose
+python -m ecommerce_category_mapper https://example-store.com --api-key YOUR_API_KEY --output categories.json --max-depth 4 --max-concurrent 8 --delay 0.5 --max-categories 200 --verbose
+
+# With JavaScript rendering (for dynamic websites)
+python -m ecommerce_category_mapper https://example-store.com --api-key YOUR_API_KEY --output categories.json --render-javascript
 
 # Help
 python -m ecommerce_category_mapper --help
@@ -88,7 +88,8 @@ async def main():
         max_depth=2,  # This will increase amount of requests (and credit cost) exponentially
         delay_between_requests=1.0,  # Delay between requests
         max_concurrent_requests=5,  # Max concurrent requests
-        max_categories=100  # Maximum categories to extract
+        max_categories=100,  # Maximum categories to extract
+        render_javascript=False  # Enable for dynamic websites
     )
 
     # Map categories (async)
@@ -103,14 +104,17 @@ async def main():
     # Export to required format
     result = category_map.to_dict()
 
+# Run async example
+asyncio.run(main())
+
 # Or use sync version
 def sync_example():
     mapper = CategoryMapper(api_key="your-api-key")
     category_map = mapper.map_categories_sync("https://example-store.com")
     return category_map
 
-# Run async example
-asyncio.run(main())
+# Run sync example
+sync_example()
 ```
 
 ## Output Format
@@ -143,6 +147,7 @@ The tool generates a structured mapping of all categories:
 - `delay_between_requests`: Delay between requests in seconds (default: 1.0)
 - `max_concurrent_requests`: Maximum concurrent requests (default: 5)
 - `max_categories`: Maximum number of categories to extract (default: 100)
+- `render_javascript`: Whether to render JavaScript on pages (default: False)
 
 ## Examples
 
@@ -154,7 +159,6 @@ See the `examples/` directory for more detailed usage examples:
 
 - Python 3.11+
 - Oxylabs AI Studio API key
-- Internet connection
 
 ## 📚 Learn more
 For a deeper dive into features, integrations, examples, and documentation, visit the [AI Studio](https://aistudio.oxylabs.io/) website.
